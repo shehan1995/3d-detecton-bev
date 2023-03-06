@@ -657,7 +657,7 @@ class Plot3DBoxBev:
 
         # draw threshold line
         x3 = np.linspace(0, self.shape)
-        y3 = np.linspace(50, 50)
+        y3 = np.linspace(150, 150)
         self.ax2.plot(x3, y3, ls="--", color="red", linewidth=1, alpha=0.5)
 
         # visualize bird eye view (bev)
@@ -683,7 +683,6 @@ class Plot3DBoxBev:
             bbox_inches="tight",
             pad_inches=0.0,
         )
-        # plt.show()
 
 
 if __name__ == "__main__":
