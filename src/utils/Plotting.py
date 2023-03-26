@@ -569,8 +569,8 @@ class Plot3DBoxBev:
         self.ax2.add_patch(patch)
 
         min_y = np.min(pred_corners_2d[:, 1])
-        if min_y < 100:
-            print(file_name)
+        if min_y < 190:
+            print("!!!!! WARNING : ",file_name)
 
     def compute_3dbox(self, bbox, dim, loc, rot_y):
         """compute 3d box"""
@@ -657,7 +657,7 @@ class Plot3DBoxBev:
 
         # draw threshold line
         x3 = np.linspace(0, self.shape)
-        y3 = np.linspace(150, 150)
+        y3 = np.linspace(190, 190)
         self.ax2.plot(x3, y3, ls="--", color="red", linewidth=1, alpha=0.5)
 
         # visualize bird eye view (bev)

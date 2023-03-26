@@ -1,5 +1,5 @@
 """ Inference Code """
-
+import csv
 from typing import List
 from PIL import Image
 import cv2
@@ -63,7 +63,9 @@ def predict_path(y_min_values):
     # y_min_values = [300, 305, 310, 315, 320]
     if len(y_min_values) < 5:
         return np.zeros(1)
-    time_delta = 1.0
+    if len(y_min_values)>15:
+        y_min_values = y_min_values[-15:]
+    time_delta = 0.3
     n = len(y_min_values)
 
     # Convert y_min_values to a numpy array and create a corresponding array of time values
@@ -75,13 +77,18 @@ def predict_path(y_min_values):
 
     # Calculate the velocity as the slope of the line
     velocity = slope
+    # print("Velocity : ", velocity)
 
-    future_time_array = np.arange(n, n+5, time_delta)
+    # ignore if relative velocity is less than a threshold
+    if velocity < 0.5:
+        return np.zeros(1)
+
+    predict_time_start = time_array[len(time_array) - 1] + time_delta
+    future_time_array = np.arange(predict_time_start, predict_time_start + 2, time_delta)
 
     future_y_min_array = slope * future_time_array + intercept
 
     return future_y_min_array
-
 
 
 @hydra.main(version_base="1.2", config_path=root / "configs", config_name="inference.yaml")
@@ -149,6 +156,21 @@ def inference(config: DictConfig):
     # Initialize an empty dictionary to store tracks
     tracks = {}
 
+    # to save video
+    # vid = cv2.VideoCapture("data/video/2.mp4")
+
+    # to save tracking video
+    out = None
+    # output = "outputs/video/2.mp4"
+    # if output:  # get video ready to save locally if flag is set
+    #     width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))  # by default VideoCapture returns float instead of int
+    #     height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    #     fps = int(vid.get(cv2.CAP_PROP_FPS))
+    #     codec = cv2.VideoWriter_fourcc(*"XVID")
+    #     out = cv2.VideoWriter(output, codec, fps, (width, height))
+
+    all_predictions = np.array([[0, 1, 2, 3, 4, 5, 6, 7, 8]])
+
     # TODO: inference on video
     # loop thru images
     imgs_path = sorted(glob(os.path.join(config.get("source_dir"), "*")), key=natural_sort_key)
@@ -177,19 +199,15 @@ def inference(config: DictConfig):
         # dimension averages #TODO: depricated
         DIMENSION = []
         height = frame.shape[0]
-        # loop thru detections
-        for det in dets:
-            # initialize object container
-            obj = KITTIObject()
-            obj.name = det["label"].split(" ")[0].capitalize()
-            obj.truncation = float(0.00)
-            obj.occlusion = int(-1)
-            box = [box.cpu().numpy() for box in det["box"]]
-            obj.xmin, obj.ymin, obj.xmax, obj.ymax = box[0], box[1], box[2], box[3]
+        print("height : ",height)
+        tracking_threshold = 400
 
+        # loop through detection to get values for tracking
+        for det in dets:
+            box = [box.cpu().numpy() for box in det["box"]]
             bbox = box
             conf = det["conf"].item()
-            cls_name = obj.name
+            cls_name = det["label"].split(" ")[0].capitalize()
             cls = det["cls"].item()
 
             x, y, xmax, ymax = bbox
@@ -200,6 +218,102 @@ def inference(config: DictConfig):
             scores.append(conf)
             classes.append(cls)
             cls_names.append(cls_name)
+
+        # ---------------------------------- DeepSORT tacker work starts here ------------------------------------------------------------
+        warning = False
+
+        features = encoder(frame,
+                           bboxes)  # encode detections and feed to tracker. [No of BB / detections per frame, embed_size]
+        detections = [Detection(bbox, score, class_name, feature) for bbox, score, class_name, feature in
+                      zip(bboxes, scores, cls_names,
+                          features)]  # [No of BB per frame] deep_sort.detection.Detection object
+
+        cmap = plt.get_cmap('tab20b')  # initialize color map
+        colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
+
+        boxs = np.array([d.tlwh for d in detections])  # run non-maxima supression below
+        scores = np.array([d.confidence for d in detections])
+        classes = np.array([d.class_name for d in detections])
+        indices = preprocessing.non_max_suppression(boxs, classes, nms_max_overlap, scores)
+        detections = [detections[i] for i in indices]
+
+        tracker.predict()
+
+        for track in tracker.tracks:
+            if not track.is_confirmed() or track.time_since_update > 1:
+                continue
+            bbox = track.to_tlbr()
+            class_name = track.get_class()
+            color = colors[int(track.track_id) % len(colors)]
+            color = [i * 255 for i in color]
+            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1] - 30)),
+                          (int(bbox[0]) + (len(class_name) + len(str(track.track_id))) * 17, int(bbox[1])),
+                          color, -1)
+            cv2.putText(frame, class_name + " : " + str(track.track_id), (int(bbox[0]), int(bbox[1] - 11)),
+                        0,
+                        0.6, (255, 255, 255), 1, lineType=cv2.LINE_AA)
+
+            # print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(
+            #     str(track.track_id), class_name,
+            #     (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+
+            # Get the track ID and class name
+            track_id = str(track.track_id)
+            class_name = track.get_class()
+
+            # Get the y_min coordinate of the bounding box
+            y_min = int(track.to_tlbr()[3])
+
+            # if track_id != '2':
+            #     continue
+
+            # Add the y_min coordinate to the track
+            if track_id in tracks:
+                tracks[track_id]['y_min'].append(y_min)
+            else:
+                tracks[track_id] = {'class': class_name, 'y_min': [y_min]}
+
+            prediction = predict_path(tracks[track_id]['y_min'])
+            # print("id ",track_id,"y ",y_min,prediction)
+
+            # Draw the points on the frame
+            # if track_id == '2':
+            print("id ", track_id, "y ", y_min, prediction)
+            array_tid = np.array(track_id)
+            prediction = np.append(y_min, prediction)
+            prediction = np.append(array_tid, prediction)
+            if len(prediction) == 9:
+                all_predictions = np.vstack([all_predictions, prediction])
+
+            if (len(prediction) > 1 and float(prediction[len(prediction) - 1]) > tracking_threshold) or y_min > tracking_threshold:
+                warning = True
+                print("warning")
+
+        tracker.update(detections)
+
+        result = np.asarray(frame)
+        result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+        cv2.line(result, (0, tracking_threshold), (result.shape[1], tracking_threshold), (0, 0, 255), 2)
+        # out.write(result)  # save output video
+        cv2.imshow("Output Video", result)
+        cv2.waitKey(1)
+
+        # ---------------------------------- DeepSORT tracker work ends here ------------------------------------------------------------
+
+        if not warning:
+            continue
+
+        # loop thru detections
+        for det in dets:
+            # initialize object container
+            obj = KITTIObject()
+            obj.name = det["label"].split(" ")[0].capitalize()
+            obj.truncation = float(0.00)
+            obj.occlusion = int(-1)
+            box = [box.cpu().numpy() for box in det["box"]]
+            obj.xmin, obj.ymin, obj.xmax, obj.ymax = box[0], box[1], box[2], box[3]
 
             # preprocess img with torch.transforms
             crop = preprocess(cv2.resize(det["im"], (224, 224)))
@@ -255,71 +369,9 @@ def inference(config: DictConfig):
                 # cv2.imwrite(f'{config.get("output_dir")}/{name}.png', img_draw)
                 plot3dbev.save_plot(config.get("output_dir"), img_name)
 
-        # ---------------------------------- DeepSORT tacker work starts here ------------------------------------------------------------
-        features = encoder(frame,
-                           bboxes)  # encode detections and feed to tracker. [No of BB / detections per frame, embed_size]
-        detections = [Detection(bbox, score, class_name, feature) for bbox, score, class_name, feature in
-                      zip(bboxes, scores, cls_names,
-                          features)]  # [No of BB per frame] deep_sort.detection.Detection object
-
-        cmap = plt.get_cmap('tab20b')  # initialize color map
-        colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
-
-        boxs = np.array([d.tlwh for d in detections])  # run non-maxima supression below
-        scores = np.array([d.confidence for d in detections])
-        classes = np.array([d.class_name for d in detections])
-        indices = preprocessing.non_max_suppression(boxs, classes, nms_max_overlap, scores)
-        detections = [detections[i] for i in indices]
-
-        tracker.predict()
-
-        for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            bbox = track.to_tlbr()
-            class_name = track.get_class()
-            color = colors[int(track.track_id) % len(colors)]
-            color = [i * 255 for i in color]
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1] - 30)),
-                          (int(bbox[0]) + (len(class_name) + len(str(track.track_id))) * 17, int(bbox[1])),
-                          color, -1)
-            cv2.putText(frame, class_name + " : " + str(track.track_id), (int(bbox[0]), int(bbox[1] - 11)),
-                        0,
-                        0.6, (255, 255, 255), 1, lineType=cv2.LINE_AA)
-
-            # print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(
-            #     str(track.track_id), class_name,
-            #     (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
-
-            # Get the track ID and class name
-            track_id = str(track.track_id)
-            class_name = track.get_class()
-
-            # Get the y_min coordinate of the bounding box
-            y_min = int(track.to_tlbr()[3])
-
-            # Add the y_min coordinate to the track
-            if track_id in tracks:
-                tracks[track_id]['y_min'].append(y_min)
-            else:
-                tracks[track_id] = {'class': class_name, 'y_min': [y_min]}
-
-            prediction = predict_path(tracks[track_id]['y_min'])
-            print("id ",track_id,"y ",y_min,prediction)
-            if len(prediction)>1 and prediction[len(prediction)-1]>430:
-                print("warning")
-
-        tracker.update(detections)
-
-        result = np.asarray(frame)
-        result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        cv2.line(result, (0, 430), (result.shape[1], 430), (0, 0, 255), 2)
-
-        cv2.imshow("Output Video", result)
-        cv2.waitKey(2)
-
-    # ---------------------------------- DeepSORT tacker work ends here ------------------------------------------------------------
+    # with open("tracks.csv", "w+") as my_csv:
+    #     csvWriter = csv.writer(my_csv, delimiter=',')
+    #     csvWriter.writerows(all_predictions)
 
     # print time
     for key, value in avg_time.items():

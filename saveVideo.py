@@ -4,13 +4,13 @@ import cv2
 
 def saveVideoFrames():
     # Open the video file
-    cap = cv2.VideoCapture('data/video/1.mp4')
+    cap = cv2.VideoCapture('data/video/Non_Accident/na_2.mp4')
 
     # Create a counter variable
     frame_count = 0
 
     # Create the directory to save the frames
-    output_dir = 'data/images1'
+    output_dir = 'data/na/images2'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
